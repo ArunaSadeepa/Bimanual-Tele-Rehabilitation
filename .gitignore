@@ -1,3 +1,33 @@
+# STM32 IDE specific files
+.settings/
+.project
+.cproject
+.mxproject
+.launch
+.metadata/
+
+# Build directories
+Debug/
+Release/
+
+# For STM32CubeIDE/CubeMX
+.gpdsc
+*.gpdsc
+*.ioc
+
+# For Keil MDK
+*.uvguix.*
+*.uvoptx
+*.uvprojx
+*.scvd
+Objects/
+
+# For IAR EWARM
+*.ewd
+*.ewt
+*.ewp
+*.dep
+
 # Prerequisites
 *.d
 
