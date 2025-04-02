@@ -1,0 +1,149 @@
+<!DOCTYPE HTML>
+<html>
+<head>
+  <title>Real-time Plot</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: Arial, sans-serif;
+      background-image: url('/Picture3.jpg');
+      background-size: cover;
+      background-position: center;
+      background-repeat: no-repeat;
+    }
+    #chart-container {
+      background-color: rgba(255, 255, 255, 0.8);
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px auto;
+      max-width: 800px;
+    }
+    canvas {
+      border: 1px solid #000000;
+    }
+  </style>
+</head>
+<body>
+  <div id="chart-container">
+    <canvas id="chart" width="800" height="400"></canvas>
+  </div>
+  <script>
+    var canvas = document.getElementById('chart');
+    var ctx = canvas.getContext('2d');
+    var data = [];
+    var times = [];
+
+    function drawChart() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      var padding = 40;
+      var chartWidth = canvas.width - 2 * padding;
+      var chartHeight = canvas.height - 2 * padding;
+
+      // Calculate range for y-axis
+      var maxVal = Math.max(...data);
+      var minVal = Math.min(...data);
+      var range = maxVal - minVal;
+      var yStep = range / 10;
+
+      // Draw y-axis
+      ctx.beginPath();
+      ctx.strokeStyle = 'black';
+      ctx.moveTo(padding, padding);
+      ctx.lineTo(padding, canvas.height - padding);
+      ctx.stroke();
+
+      // Draw y-axis labels
+      ctx.textAlign = 'right';
+      ctx.textBaseline = 'middle';
+      for (var i = 0; i <= 10; i++) {
+        var y = canvas.height - padding - (i / 10) * chartHeight;
+        var value = minVal + i * yStep;
+        ctx.fillText(value.toFixed(2), padding - 5, y);
+        
+        // Draw horizontal grid lines
+        ctx.beginPath();
+        ctx.strokeStyle = 'lightgray';
+        ctx.moveTo(padding, y);
+        ctx.lineTo(canvas.width - padding, y);
+        ctx.stroke();
+      }
+
+      // Draw x-axis
+      ctx.beginPath();
+      ctx.strokeStyle = 'black';
+      ctx.moveTo(padding, canvas.height - padding);
+      ctx.lineTo(canvas.width - padding, canvas.height - padding);
+      ctx.stroke();
+
+      // Draw x-axis labels
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      var timeRange = times[times.length - 1] - times[0];
+      for (var i = 0; i <= 10; i++) {
+        var x = padding + (i / 10) * chartWidth;
+        var time = times[0] + (i / 10) * timeRange;
+        ctx.fillText(time.toFixed(1), x, canvas.height - padding + 5);
+        
+        // Draw vertical grid lines
+        ctx.beginPath();
+        ctx.strokeStyle = 'lightgray';
+        ctx.moveTo(x, padding);
+        ctx.lineTo(x, canvas.height - padding);
+        ctx.stroke();
+      }
+
+      // Draw data points
+      ctx.beginPath();
+      ctx.strokeStyle = 'blue';
+      ctx.lineWidth = 2;
+
+      for (var i = 0; i < data.length; i++) {
+        var x = padding + (times[i] - times[0]) / timeRange * chartWidth;
+        var y = canvas.height - padding - ((data[i] - minVal) / range) * chartHeight;
+        
+        if (i === 0) {
+          ctx.moveTo(x, y);
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      
+      ctx.stroke();
+
+      // Label axes
+      ctx.fillStyle = 'black';
+      ctx.textAlign = 'center';
+      ctx.fillText('Time (s)', canvas.width / 2, canvas.height - 10);
+      ctx.save();
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText('Value', -canvas.height / 2, 15);
+      ctx.restore();
+    }
+
+    var ws = new WebSocket('ws://' + location.hostname + ':81/');
+    ws.onopen = function() {
+      console.log('WebSocket connected');
+    };
+    ws.onerror = function(error) {
+      console.log('WebSocket error: ', error);
+    };
+    ws.onmessage = function(event) {
+    console.log('Received data:', event.data);
+    var receivedData = JSON.parse(event.data);
+
+    // Process data based on type
+    if (receivedData.type === 'plot') {
+      data.push(receivedData.value);
+      times.push(receivedData.time);
+      if (data.length > 50) {
+        data.shift();
+        times.shift();
+      }
+      drawChart();
+    }
+  };
+  </script>
+</body>
+</html>

@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Settings</title>
+    <style>
+      *,
+      ::after,
+      ::before {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans",
+          "Liberation Sans";
+        font-size: 1rem;
+        font-weight: 400;
+        line-height: 1.5;
+        color: #024487;
+        background-color: #f5f5f5;
+        background-image: url("/Settings_bg.jpg");
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+      }
+
+      .form-control {
+        display: block;
+        width: 100%;
+        height: calc(1.5em + 0.75rem + 2px);
+        border: 1px solid #ced4da;
+      }
+
+      button {
+        cursor: pointer;
+        border: 1px solid transparent;
+        color: #fff;
+        background-color: #007bff;
+        border-color: #007bff;
+        padding: 0.5rem 1rem;
+        font-size: 1.25rem;
+        line-height: 1.5;
+        border-radius: 0.3rem;
+        width: 100%;
+        transition: box-shadow 0.3s ease-in-out; /* Add transition for smooth effect */
+        transition: background-color 0.3s ease-in-out;
+      }
+
+      button:hover {
+        box-shadow: 0 0 10px rgba(28, 2, 29, 0.751); /* Add shadow on hover */
+        background-color: #051e39;
+      }
+
+      .form-signin {
+        width: 100%;
+        max-width: 400px;
+        padding: 15px;
+        margin: auto;
+        background-color: rgba(255, 255, 255, 0.8);
+        border-radius: 8px;
+      }
+      h1 {
+        text-align: center;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="form-signin">
+      <form action="/save-settings" method="post">
+        <h1 class="">Settings</h1>
+        <br />
+        <div class="form-floating">
+          <label>Assistance (spring_constant)</label>
+          <select class="form-control" name="spring_constant" required>
+            <option value="">Select Assistance Level</option>
+            <option value="10" %SPRING_10%>Low (10 N/m)</option>
+            <option value="20" %SPRING_20%>Medium (20 N/m)</option>
+            <option value="30" %SPRING_30%>High (30 N/m)</option>
+          </select>
+        </div>
+        <div class="form-floating">
+          <br /><label>Cutoff frequency</label>
+          <input
+            type="number"
+            step="0.1"
+            class="form-control"
+            name="cutoff_frequency"
+            required
+            value="%CUTOFF_FREQ%"
+          />
+        </div>
+        <div class="form-group">
+          Exercise Mode: <span id="exerciseMode">%EXERCISE_MODE%</span>
+        </div>
+
+        <div class="form-group">
+          Active Side: <span id="activeSide">%ACTIVE_SIDE%</span>
+        </div>
+
+        <div class="form-group">
+          Repetitions: <span id="repetitions">%REPETITIONS%</span>
+        </div>
+        <div class="form-group">
+          T_Cmd_M: <span id="T_Cmd_M">%T_Cmd_M%</span>
+        </div>
+        <div class="form-group">
+          T_Cmd_S: <span id="T_Cmd_S">%T_Cmd_S%</span>
+        </div>
+        <div class="form-group">
+          T_Act_M: <span id="T_Act_M">%T_Act_M%</span>
+        </div>
+        <div class="form-group">
+          T_Act_S: <span id="T_Act_S">%T_Act_S%</span>
+        </div>
+        <div class="form-group">Pos_M: <span id="Pos_M">%Pos_M%</span></div>
+        <div class="form-group">Pos_S: <span id="Pos_S">%Pos_S%</span></div>
+        <div class="form-group">Is_Up: <span id="Is_Up">%Is_Up%</span></div>
+
+        <br /><br />
+        <button type="submit">Save Settings</button>
+        <br /><br />
+        <button type="button" onclick="backToHome()">Back</button>
+      </form>
+    </main>
+    <script>
+      var socket = new WebSocket("ws://" + window.location.hostname + ":81/");
+      socket.onmessage = function (event) {
+        var data = JSON.parse(event.data);
+        if (data.type === "indicator") {
+          document.getElementById("exerciseMode").textContent =
+            data.exerciseMode;
+          document.getElementById("activeSide").textContent = data.activeSide;
+          document.getElementById("repetitions").textContent = data.repetitions;
+        }
+
+        if (data.type === "data01") {
+          document.getElementById("T_Cmd_M").textContent = data.T_Cmd_M;
+          document.getElementById("T_Cmd_S").textContent = data.T_Cmd_S;
+          document.getElementById("T_Act_M").textContent = data.T_Act_M;
+          document.getElementById("T_Act_S").textContent = data.T_Act_S;
+          document.getElementById("Pos_M").textContent = data.Pos_M;
+          document.getElementById("Pos_S").textContent = data.Pos_S;
+          document.getElementById("Is_Up").textContent = data.Is_Up;
+                 }
+      };
+
+      function backToHome() {
+        window.location.href = "/";
+      }
+    </script>
+  </body>
+</html>
