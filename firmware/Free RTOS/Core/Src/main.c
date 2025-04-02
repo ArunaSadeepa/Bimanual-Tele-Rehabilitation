@@ -214,7 +214,7 @@ float Ki_M = 0.10;
 float Kd_M = 0.01; // set gains
 
 float Kp_S = 2.0;
-float Ki_S = 0.005;
+float Ki_S = 0.001;
 float Kd_S = 0.1; // set gains
 
 /************* Variables for controlling update rate and motor parameters *****************************/
@@ -491,7 +491,7 @@ void INITIALIZATION_Task(void *argument) {
 		HAL_I2C_Master_Transmit(&hi2c3, 0, (uint8_t*) &dataToSend,
 				sizeof(float), 100);
 
-		dataToSend = T_Rec1;
+		dataToSend = T_Rec2*26.0;
 		xx = xx + 1;
 
 		uint32_t currentTime = HAL_GetTick();
@@ -501,8 +501,8 @@ void INITIALIZATION_Task(void *argument) {
 			ind.exerciseMode = IsRo;
 			ind.repetitions = xx;
 
-			HAL_StatusTypeDef send_ind = HAL_I2C_Master_Transmit(&hi2c3, 0,
-					(uint8_t*) &ind, sizeof(struct indicators), 100);
+			HAL_I2C_Master_Transmit(&hi2c3, 0, (uint8_t*) &ind,
+					sizeof(struct indicators), 100);
 
 			lastIndicatorSendTime = currentTime;
 		}
