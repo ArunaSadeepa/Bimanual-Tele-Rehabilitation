@@ -24,6 +24,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 
+// FreeRTOS includes for multitasking functionality
 #include "FreeRTOS.h"
 #include "task.h"
 #include "timers.h"
@@ -31,21 +32,22 @@
 #include "semphr.h"
 #include "event_groups.h"
 
+// Standard libraries
 #include "string.h"
 #include "stdio.h"
 #include <stdbool.h>
-#include "motor_encoder.h"
-#include "moving_average_int16.h"
 #include "math.h"
-#include "motor.h"
-#include "fatfs_sd.h"
+#include <stdlib.h>
+#include "FLASH_SECTOR_F7.h"
+
+// Custom libraries for motor control and other functionalities
+#include "DFR_i2c.h"
 #include "dob.h"
 #include "rtob.h"
-#include <stdlib.h>
-
-#include "DFR_i2c.h"
-//#include "File_Handling_RTOS.h"
-#include "FLASH_SECTOR_F7.h"
+#include "motor.h"
+#include "motor_encoder.h"
+#include "moving_average_int16.h"
+#include "fatfs_sd.h"
 
 /* USER CODE END Includes */
 
@@ -63,7 +65,10 @@
 #define MOTOR2_DIR_GPIO_Port GPIOA
 #define MOTOR2_DIR_Pin GPIO_PIN_2
 
+// Macro to convert milliseconds to RTOS ticks, we use this for vTaskDelayUntil function, for precise timing
 #define MS_TO_TICKS(ms) ((TickType_t)((((TickType_t)(ms)) * (TickType_t)configTICK_RATE_HZ) / (TickType_t)1000))
+
+// Define data size for user metrics and settings structures
 #define DATA_SIZE (sizeof(struct user_metrics) + sizeof(struct settings))
 
 /* USER CODE END PD */
@@ -73,7 +78,6 @@
 
 /* tim1 for encoder 1
  * tim4 for encoder 2
- * tim3 for PWM
  */
 
 /* USER CODE END PM */
@@ -90,27 +94,33 @@ TIM_HandleTypeDef htim4;
 UART_HandleTypeDef huart2;
 UART_HandleTypeDef huart3;
 
-osThreadId defaultTaskHandle;
 /* USER CODE BEGIN PV */
 
 /* Define instances for motor control */
-encoder_instance enc_instance_M1; // motor 1
-encoder_instance enc_instance_M2; // motor 2
 
-pid_instance_int16 pid_instance_M1;
-pid_instance_int16 pid_instance_M2;
+// Encoder instances for motor 1 and motor 2 ( file included for this is "motor_encoder.h")
+encoder_instance enc_instance_M1; // Encoder instance for motor 1
+encoder_instance enc_instance_M2; // Encoder instance for motor 2
 
-mov_aver_instance_int16 filter_instance1;
-mov_aver_instance_int16 filter_instance2;
+// PID controller instances for motor 1 and motor 2  ( file included for this is "motor.h")
+pid_instance_int16 pid_instance_M1; // PID controller instance for motor 1
+pid_instance_int16 pid_instance_M2; // PID controller instance for motor 2
 
-dob_instance dob1;
-dob_instance dob2;
+// Moving average filter instances for smoothing data of T_rec ( file included for this is "moving_average_int16.h")
+mov_aver_instance_int16 filter_instance1; // Filter instance for T_Rec1 data
+mov_aver_instance_int16 filter_instance2; // Filter instance for T_Rec2 data
 
-rtob_instance rtob1;
-rtob_instance rtob2;
+// Disturbance observer instances for motor 1 and motor 2 ( file included for this is "dob.h")
+dob_instance dob1; // Disturbance observer for motor 1
+dob_instance dob2; // Disturbance observer for motor 2
 
-DFRobot_GP8XXX_IIC gp8211s_1;
-DFRobot_GP8XXX_IIC gp8211s_2;
+// Reaction torque observer instances for motor 1 and motor 2 ( file included for this is "rtob.h")
+rtob_instance rtob1; //Reaction torque observer for motor 1
+rtob_instance rtob2; //Reaction torque observer for motor 2
+
+// Instances for I2C communication with GP8211 dac module
+DFRobot_GP8XXX_IIC gp8211s_1;  // for module 1
+DFRobot_GP8XXX_IIC gp8211s_2;  // for module 2
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -122,7 +132,6 @@ static void MX_TIM4_Init(void);
 static void MX_SPI4_Init(void);
 static void MX_I2C3_Init(void);
 static void MX_USART2_UART_Init(void);
-void StartDefaultTask(void const *argument);
 
 /* USER CODE BEGIN PFP */
 
@@ -135,71 +144,49 @@ xTaskHandle BM_Task_Hnadler;
 xTaskHandle SDCARD_Task_Hnadler;
 xTaskHandle INITIALIZATION_Task_Hnadler;
 
-/******************Time variables*************************/
-
-uint32_t current_time = 0;
-uint32_t pre_time = 0;
-
-uint32_t current_time1 = 0;
-uint32_t pre_time1 = 0;
-uint32_t pre_time0 = 0;
-
-/***************************** Variables for SD ********************************************/
-
-char buffer[1024]; // to store the data
-/************* PID Control Variables  for elmo 12 bit *****************************/
-/*
- float Kp = 650.0; // 700
- float Ki = 0.02;  //0.01
- float Kd = 0.0;
- */
 /************* Variables for friction estimation *****************************/
 
 float motor1_vel;       // Motor1 velocity
 float motor2_vel;       // Motor2 velocity
-float motor1_vel_u;       // Motor1 velocity unfiltered
-float motor2_vel_u;
 
-float motor1_prevel;       // Motor1 velocity
-float motor2_prevel;       // Motor2 velocity
+float motor1_prevel;    // previous Motor1 velocity
+float motor2_prevel;    // previous Motor2 velocity
 
 float motor1_pos; 		// Motor1 position
 float motor2_pos; 		// Motor2 position
 
-float T_Dis_AVG;
+float dt = 5; /* Update interval in milliseconds for encoder functions(velocity and position),
+ DOB, RTOB and pid functions, after change this, every tuning parameters needs to changed accordingly*/
 
-float dt = 5; // Update interval in milliseconds for encoder functions(velocity and position), DOB, RTOB and pid functions
+float Ia_ref1;     // estimated motor 1 reference current
+float T_Dis1;      // filtered estimated motor 1 disturbance torque
+float T_Dis1_u;    // un-filtered estimated motor 1 disturbance torque
+float T_Rec1;      // filtered estimated motor 1 reaction torque
+float T_Rec1_u;    // un-filtered estimated motor 1 reaction torque
+float T_P1;        // Torque profile data relevant to motor 1 position
+float T_G1;        // gravity compensation of 1
+float volt1;       // output set voltage for dac 1
 
-float Ia_ref1;
-float T_Dis1;
-float T_Rec1;
-float T_P1;
-float T_G1;
-float volt1;
+float Ia_ref2;     // estimated motor 2 reference current
+float T_Dis2;      // filtered estimated motor 2 disturbance torque
+float T_Dis2_u;    // un-filtered estimated motor 2 disturbance torque
+float T_Rec2;      // filtered estimated motor 2 reaction torque
+float T_Rec2_u;    // un-filtered estimated motor 2 reaction torque
+float T_P2;        // Torque profile data relevant to motor 2 position
+float T_G2;        // gravity compensation of 2
+float volt2;       // output set voltage for dac 1
 
-float Ia_ref2;
-float T_Dis2;
-float T_Rec2;
-float T_P2;
-float T_G2;
-float volt2;
+float k_s = 50.0; // Spring constant
+float k_sd = 50.0; // spring damper constant
 
-float T_Dis1_u;
-float T_Rec1_u;
-
-float T_Dis2_u;
-float T_Rec2_u;
-
-float k_s = 50.0;
-float k_sd = 50.0;
-
+/****************** arrays to store data to be written to SD card  *******************************/
 float TorqueDown1[100];
 float TorqueDown2[100];
 float PositionDown1[100];
 float PositionDown2[100];
 
 int ThetaConuterDown = 0;
-int SD_DoneDown = 0;
+int SD_DoneDown = 0; // flag
 
 float TorqueUp1[100];
 float TorqueUp2[100];
@@ -207,56 +194,57 @@ float PositionUp1[100];
 float PositionUp2[100];
 
 int ThetaConuterUp = 81;
-int SD_DoneUp = 0;
+int SD_DoneUp = 0; // flag
+/*************************************************************************************************/
 
-float Kp_M = 10.0;
+/*********************PID gains of master and follower *******************************************/
+float Kp_M = 10.0; // set gains of master
 float Ki_M = 0.10;
-float Kd_M = 0.01; // set gains
+float Kd_M = 0.01;
 
-float Kp_S = 2.0;
+float Kp_S = 2.0; // set gains of follower
 float Ki_S = 0.001;
-float Kd_S = 0.1; // set gains
+float Kd_S = 0.1;
+/*************************************************************************************************/
 
-/************* Variables for controlling update rate and motor parameters *****************************/
+/************* Variables for motor parameters ************************/
 
 float PPR = 512.0;       // Pulses per revolution
 float gear_ratio = 26.0; // Gear ratio
-float k_T = 0.0705;
-float J_M = +3069.1e-7;
-float I_max = 4.0;
+float k_T = 0.0705;      // Torque constant Nm/A
+float J_M = +3069.1e-7;  // rotor inertia kgm^3
+float I_max = 4.0;       // current limiter
 
-float RPM_k;            // RPM constant
-float RPM_to_Rads_per_sec; // RPM to Rads/sec
-float Ticks_to_Deg;
+float RPM_k;               // constant to  calculate RPM form ticks/s
+float RPM_to_Rads_per_sec; // constant to to calculate rads per sec from rpm
+float Ticks_to_Deg;        // constant to calculate degrees form ticks
 
-/********* Variables for the START/STOP button *****************/
+/*************************************************************************************************/
 
-GPIO_PinState Enable = GPIO_PIN_SET;
-GPIO_PinState SetPos = GPIO_PIN_RESET;
-GPIO_PinState IsRotation = GPIO_PIN_RESET;
+/********************** Time variables for de-bounce of inbuilt user button***********************/
 
-bool Running;
 uint32_t previousMillis = 0;
 uint32_t currentMillis = 0;
 
-/********* Variables for Mode *****************/
+/*************************************************************************************************/
+
+/********* Variables for buttons *****************************************************************/
+
+// can be used to get several modes, there are pins for this on the pcb
 short Mode = 0;
 // Exercise = 0;
 // Friction = 1;
 // Inertia = 2;
 
-bool IsRo = 0;
+bool IsRo = 0; // Is rotational movement
+bool IsDown = 0; // Is the arm going down
+bool MST1 = 1; // Is the master at side 1
 
-bool IsDown = 0;
-
-bool MST1 = 1;
-
-/********* Variables for J and COG *****************/
-
-bool IsMale = 0;
+/********* Variables to calculate inertia of hand and COG ( center of gravity) *******************/
 
 const float g = 9.81;
 
+// these values took from the research paper to estimate J and COG
 const float FAweight[] = { 0.0187, 0.0157 };
 const float HAweight[] = { 0.0065, 0.005 };
 const float FAlen[] = { 0.157, 0.16 };
@@ -266,21 +254,18 @@ const float HArog[] = { 0.549, 0.54 };
 const float FAcog[] = { 0.43, 0.434 };
 const float HAcog[] = { 0.468, 0.468 };
 
-float height = 1.7;
-float weight = 55;
-float J, J_Ro, G;
-float g_dis = 20.0;
-
 const float RoWeight = 0.25;
 const float RoCOG = 0.02;
 
-/******************************************/
-int Status = -2;
+// default values of the patient ( this will be change from the values send by the web interface )
+float height = 1.7;
+float weight = 55;
+bool IsMale = 0; // is the person is male
+char gen[7];
 
-int direction = 0;
-int enable = 0;
+float J, J_Ro, G;
+float g_dis = 20.0;
 
-/**********************************************/
 /***************************** Variables for SD ********************************************/
 FATFS fs; // file system
 FIL fil; // file
@@ -289,19 +274,20 @@ char buffer[1024]; // to store the data
 UINT br, bw; // file read and write count
 /**********************************************/
 
-/*********************** to send the data to the uart ****************************/
+/*********************** to send the data to the uart *************************************/
 
 void send_uart(char *string) {
 
 	uint8_t len = strlen(string);
-	HAL_UART_Transmit(&huart2, (uint8_t*) string, len, 2000); // transmit in blocking mode
+	HAL_UART_Transmit(&huart2, (uint8_t*) string, len, 2000);
 
 }
 
 /*************Timing**************/
+
 TickType_t xLastWakeTime_BM, xLastWakeTime_SDCARD;
 
-/*************** saving user data ***********************/
+/*************** saving user data and settings ********************************************/
 struct user_metrics {
 	float Weight;
 	float Height;
@@ -313,46 +299,38 @@ struct settings {
 	float g_dis;
 };
 
-/*************** saving user data to confirm ***********************/
+/*************** saving user data just to confirm *****************************************/
 struct data_to_send {
 	struct user_metrics metrics;
 	struct settings settings;
 };
 
+/*************** Indicator parameters of web interface ************************************/
 struct indicators {
 	int exerciseMode;
 	int MasterSide;
 	int repetitions;
 };
 
-/**************************************************************/
-float wgt;
-float hgt;
-char gen[7];
-
-float J1;
-float G1;
-
-float springConstant;
-float cutoffFrequency;
-
-/**************************************************************/
+/*********** function prototypes *********************************************************/
 
 void WriteToSD(float DATA1[], float DATA2[], uint32_t size, char fileName[]);
-void Bimanual_MotorCtrl_M1(void);
-void Bimanual_MotorCtrl_M2(void);
+void Bimanual_MotorCtrl_M1(void);  // bi-manual function when motor 1 is master
+void Bimanual_MotorCtrl_M2(void);  // bi-manual function when motor 2 is master
+void Profile_Record(void);         // to record rotational torque profile
 
-float findJ(bool i);
-float findG(bool i);
+float findJ(bool i);  // to find the inertia of arm
+float findG(bool i);  // to find the center of gravity of arm
+float J1;             // inertia of arm
+float G1;             // center of gravity of arm
 
 void SDCARD_Task(void *argument) {
 
-	xLastWakeTime_SDCARD = xTaskGetTickCount();
+	//xLastWakeTime_SDCARD = xTaskGetTickCount(); // this is for precise timing
 
 	while (1) {
-		//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14); // red LED
-		//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7); // blue LED
 
+		// get the reaction torques at every 1 degree angle when it going down direction and put it in to array
 		if (motor1_pos > ThetaConuterDown && SD_DoneDown == 0) {
 
 			PositionDown1[ThetaConuterDown] = motor1_pos;
@@ -363,6 +341,7 @@ void SDCARD_Task(void *argument) {
 			ThetaConuterDown = ThetaConuterDown + 1;
 		}
 
+		// get the reaction torques at every 1 degree angle when it going up and put it in to array
 		if (motor1_pos < ThetaConuterUp && SD_DoneDown == 1) {
 
 			PositionUp1[ThetaConuterUp] = motor1_pos;
@@ -373,14 +352,7 @@ void SDCARD_Task(void *argument) {
 			ThetaConuterUp = ThetaConuterUp - 1;
 		}
 
-		/*if (motor1_pos < 1) {
-		 SD_DoneDown = 0;
-		 }
-
-		 if (motor1_pos > 81) {
-		 SD_DoneUp = 0;
-		 }*/
-
+		// write when at 81 degrees when going down direction
 		if (ThetaConuterDown == 81) {
 
 			WriteToSD(PositionDown1, TorqueDown1, 82, "T1_Down.TXT");
@@ -390,6 +362,7 @@ void SDCARD_Task(void *argument) {
 			ThetaConuterDown = 0;
 		}
 
+		// write when at 0 degree angle when going up direction
 		if (ThetaConuterUp == 0) {
 
 			WriteToSD(PositionUp1, TorqueUp1, 82, "T1_Up.TXT");
@@ -398,22 +371,18 @@ void SDCARD_Task(void *argument) {
 			HAL_GPIO_WritePin(GPIOF, GPIO_PIN_9, GPIO_PIN_SET); // SD led
 			ThetaConuterUp = 81;
 		}
-		//HAL_GPIO_TogglePin(GPIOF, GPIO_PIN_9);
 
 		vTaskDelay(100);
 
-		//vTaskDelayUntil(&xLastWakeTime_SDCARD, pdMS_TO_TICKS(2)); // 500 Hz
+		//vTaskDelayUntil(&xLastWakeTime_SDCARD, pdMS_TO_TICKS(2)); // 500 Hz // for precise timing
 	}
 
 }
 
-uint8_t delet[DATA_SIZE];
-int xx = 0;
-#define DATA_HEADER 0x01
+int xx = 0; // this variable should be replaced by the "Number of repetition" variable (replace xx with the repetions at COMMENT FLAG 1)
 
 void INITIALIZATION_Task(void *argument) {
 
-	uint8_t data[] = "STM Ready";
 	uint8_t I2cBuffer[DATA_SIZE];
 	float dataToSend = 0;
 	static uint32_t lastIndicatorSendTime = 0;
@@ -421,8 +390,8 @@ void INITIALIZATION_Task(void *argument) {
 	static float xx = 0;
 
 	while (1) {
-		//HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_14); // red LED
 
+		/* Mode selection here */
 		if (HAL_GPIO_ReadPin(Mode_Selection_3_GPIO_Port, Mode_Selection_3_Pin)
 				== GPIO_PIN_RESET) {
 
@@ -434,52 +403,61 @@ void INITIALIZATION_Task(void *argument) {
 			Mode = 2;
 
 		} else if (HAL_GPIO_ReadPin(Mode_Selection_1_GPIO_Port,
-		Mode_Selection_1_Pin) == GPIO_PIN_SET) {
+		Mode_Selection_1_Pin) == GPIO_PIN_RESET) {
 
 			Mode = 3;
-
 		}
+
+		/* Change the exercise */
 
 		if (HAL_GPIO_ReadPin(CHANGE_EXERCISE_GPIO_Port, CHANGE_EXERCISE_Pin)
 				== GPIO_PIN_RESET) {
 
+			// flexion and extension
 			IsRo = 0;
 			HAL_GPIO_WritePin(Error_Indication_2_GPIO_Port,
-			Error_Indication_2_Pin, GPIO_PIN_SET);
+			Error_Indication_2_Pin, GPIO_PIN_SET); // indicate flexion and extension by turning on led
 		} else {
+			// rotational
 			IsRo = 1;
 			HAL_GPIO_WritePin(Error_Indication_2_GPIO_Port,
-			Error_Indication_2_Pin, GPIO_PIN_RESET);
-
+			Error_Indication_2_Pin, GPIO_PIN_RESET); // indicate rotational by turning off led
 		}
 
+		/* Master change */
 		if (HAL_GPIO_ReadPin(MST_SLV_SHIFT_GPIO_Port, MST_SLV_SHIFT_Pin)
 				== GPIO_PIN_RESET) {
-
+			// master is at side 2
 			MST1 = 0;
 			HAL_GPIO_WritePin(Error_Indication_1_GPIO_Port,
-			Error_Indication_1_Pin, GPIO_PIN_RESET);
-
+			Error_Indication_1_Pin, GPIO_PIN_RESET); // indicate master is at side 2 by turning off led
 		}
 
 		else {
+			// master is at side 1
 			MST1 = 1;
 			HAL_GPIO_WritePin(Error_Indication_1_GPIO_Port,
-			Error_Indication_1_Pin, GPIO_PIN_SET);
+			Error_Indication_1_Pin, GPIO_PIN_SET); // indicate master is at side 1 by turning on led
 
 		}
 
+		/* DATA_READY pin is used to get data from esp32,
+		 *  whenever the esp32 wants to send new data, this gpio will be set to high by the esp32*/
 		if (HAL_GPIO_ReadPin(DATA_READY_GPIO_Port, DATA_READY_Pin)
 				== GPIO_PIN_SET) {
 
+			//NOTE; this is not complete, after reading this pin we need to read i2c bus for the new data
+			// currently the data is reading every 1 second ( see COMMENT FLAG 2)
+
+			// after new data we need to calculate J1 and G1 again for new user parameters
 			J1 = findJ(IsMale);
 			G1 = findG(IsMale);
 
-			set_dob(&dob1, k_T, J1, g_dis); // k = 70.5mNm/A  ,  j = 3069.1 gcm2  , g_dis = 50
-			set_rtob(&rtob1, k_T, J1, g_dis, 0.0129, 0.0003);
+			set_dob(&dob1, k_T, J, g_dis); // k = 70.5mNm/A  ,  J should be replace with J1
+			set_rtob(&rtob1, k_T, J, g_dis, 0.0129, 0.0003); // dynamic friction coefficient = 0.0129 Nm, static fric. =  0.0003 Nm/rpm
 
-			set_dob(&dob2, k_T, J1, g_dis); // k = 70.5mNm/A  ,  j = 3069.1 gcm2  , g_dis = 50
-			set_rtob(&rtob2, k_T, J1, g_dis, 0.0129, 0.0003);
+			set_dob(&dob2, k_T, J, g_dis); // k = 70.5mNm/A  ,   J should be replace with J1
+			set_rtob(&rtob2, k_T, J, g_dis, 0.0129, 0.0003); // dynamic friction coefficient = 0.0129 Nm, static fric. =  0.0003 Nm/rpm
 
 			HAL_GPIO_WritePin(GPIOF, GPIO_PIN_9, GPIO_PIN_SET); // SD led
 
@@ -488,18 +466,23 @@ void INITIALIZATION_Task(void *argument) {
 
 		}
 
+		// this is to send data to plot
 		HAL_I2C_Master_Transmit(&hi2c3, 0, (uint8_t*) &dataToSend,
 				sizeof(float), 100);
 
-		dataToSend = T_Rec2*26.0;
+		dataToSend = T_Rec2 * 26.0; // To plot
+
+		//replace xx with the repetions at COMMENT FLAG 1
 		xx = xx + 1;
 
+		// send indication data every 1 second
 		uint32_t currentTime = HAL_GetTick();
 		if (currentTime - lastIndicatorSendTime >= 1000) {
 
 			ind.MasterSide = MST1;
 			ind.exerciseMode = IsRo;
-			ind.repetitions = xx;
+			// COMMENT FLAG 1
+			ind.repetitions = xx; //replace xx with the repetions
 
 			HAL_I2C_Master_Transmit(&hi2c3, 0, (uint8_t*) &ind,
 					sizeof(struct indicators), 100);
@@ -507,12 +490,11 @@ void INITIALIZATION_Task(void *argument) {
 			lastIndicatorSendTime = currentTime;
 		}
 
-		//HAL_I2C_Master_Transmit(&hi2c3, 0, data, 32, 10);
+		// COMMENT FLAG 2
+		// read esp32 data at every 1 sec
 		HAL_StatusTypeDef I2Cstatus = HAL_I2C_Master_Receive(&hi2c3, 0,
 				I2cBuffer,
 				DATA_SIZE, 100);
-
-		memcpy(&delet, I2cBuffer, DATA_SIZE); // just to confirm
 
 		if (I2Cstatus == HAL_OK) {
 
@@ -534,8 +516,6 @@ void INITIALIZATION_Task(void *argument) {
 				IsMale = 0;
 			}
 			//k_s = received_settings.K;
-
-			//cutoffFrequency = received_settings.G;
 			//g_dis = received_settings.g_dis;
 
 			struct data_to_send confirmation_data;
@@ -589,30 +569,31 @@ void BM_Task(void *argument) {
 
 		if (Mode == 1) {
 			if (MST1) {
-				set_pid_gain(&pid_instance_M1, Kp_M, Ki_M, Kd_M); // set gains
-				set_pid_gain(&pid_instance_M2, Kp_S, Ki_S, Kd_S); // set gains
-				Bimanual_MotorCtrl_M1(); // nearly 150us
+				set_pid_gain(&pid_instance_M1, Kp_M, Ki_M, Kd_M); // set gains for master
+				set_pid_gain(&pid_instance_M2, Kp_S, Ki_S, Kd_S); // set gains for follower
+				Bimanual_MotorCtrl_M1();
 
 			} else {
-				set_pid_gain(&pid_instance_M1, Kp_S, Ki_S, Kd_S); // set gains
-				set_pid_gain(&pid_instance_M2, Kp_M, Ki_M, Kd_M); // set gains
-				Bimanual_MotorCtrl_M2(); // nearly 150us
+				set_pid_gain(&pid_instance_M1, Kp_S, Ki_S, Kd_S); // set gains for follower
+				set_pid_gain(&pid_instance_M2, Kp_M, Ki_M, Kd_M); // set gains for master
+				Bimanual_MotorCtrl_M2();
 
 			}
 		}
 
 		if (Mode == 2) {
-			Profile_Record(); // nearly 150us
+			Profile_Record();
 		}
 
 		//vTaskDelayUntil(&xLastWakeTime_BM, xFrequency);
 		//vTaskDelayUntil(&xLastWakeTime_BM, MS_TO_TICKS(5)); // 1 kHz
-		vTaskDelay(5);
+		vTaskDelay(5); // dt = 5
 
 	}
 
 }
 
+/**************** function to write on SD card ********************************************/
 void WriteToSD(float DATA1[], float DATA2[], uint32_t size, char fileName[]) {
 	if (f_open(&fil, fileName,
 	FA_OPEN_ALWAYS | FA_READ | FA_WRITE | FA_OPEN_APPEND) == FR_OK) {
@@ -630,7 +611,6 @@ void WriteToSD(float DATA1[], float DATA2[], uint32_t size, char fileName[]) {
 }
 
 /********************* Custom write function for ITM interface ****************************/
-
 int _write(int file, char *ptr, int len) {
 	int i;
 	for (i = 0; i < len; i++) {
@@ -639,8 +619,7 @@ int _write(int file, char *ptr, int len) {
 	return len;
 }
 
-/* to find the size of data in the buffer*/
-
+/************* function to find the size of data in the buffer*****************************/
 int bufsize(char *buf) {
 
 	int i = 0;
@@ -649,39 +628,26 @@ int bufsize(char *buf) {
 	return i;
 }
 
-/* to clean the buffer*/
-
+/************* function to clean the buffer ***********************************************/
 void bufclear(void) {
 
 	for (int i = 0; i < 1024; i++)
 		buffer[i] = '\0';
 }
 
-/******************** Interrupt for user button to toggle the outputs **********************************/
-
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin) {
 
 	currentMillis = HAL_GetTick();
+	//user button to toggle
 	if (GPIO_Pin == GPIO_PIN_13 && (currentMillis - previousMillis > 150)) {
 
 		// User Button was pressed
 		previousMillis = currentMillis;
 		HAL_GPIO_TogglePin(GPIOB, GPIO_PIN_7); // blue LED
-		Enable ^= GPIO_PIN_SET; //Toggle the state
-	}
-
-// Check if the interrupt is from BUTTON2 on the correct port
-	else if (GPIO_Pin == GPIO_PIN_14
-	/*&& HAL_GPIO_ReadPin(GPIOE, GPIO_PIN_14) == GPIO_PIN_SET*/
-	&& (currentMillis - previousMillis > 150)) {
-
-		// External Button 2 was pressed PE14
-		previousMillis = currentMillis;
-		HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_8); // M_Driver1_Enable
-		Enable ^= GPIO_PIN_SET; //Toggle the state
 	}
 }
 
+/**************** function to find the inertia of arm ************************************/
 float findJ(bool i) {
 	float FAJ = weight * FAweight[i] * (height * FAlen[i] * FArog[i])
 			* (height * FAlen[i] * FArog[i]);
@@ -698,6 +664,7 @@ float findJ(bool i) {
 	return (FAJ + HAJ + J_Ro) / (gear_ratio * gear_ratio) + J_M;
 }
 
+/**************** function to find the center of gravity of arm **************************/
 float findG(bool i) {	// pos = angle from horizontal
 	float w = FAweight[i] + HAweight[i];
 	float TFA = FAweight[i] * FAlen[i] * HAcog[i];
@@ -706,8 +673,9 @@ float findG(bool i) {	// pos = angle from horizontal
 	return w * weight * g * (height * (TFA + THA) / w) + RoWeight * RoCOG;
 }
 
+/**************** Torque profile *********************************************************/
 float torque_profile(float position, bool IsRo, bool IsDown) {
-	if (IsRo) {
+	if (IsRo) { // the following torque profiles need to replaced with torque profiles of the rotational movement
 		if (!IsDown) {
 			return -0.00006 * position * position * position
 					+ 0.0045 * position * position + 0.3899 * position + 65.208;
@@ -726,9 +694,9 @@ float torque_profile(float position, bool IsRo, bool IsDown) {
 	}
 }
 
+/**************** Gravity function *******************************************************/
 float T_gravity(float position, bool IsDown, float G, bool IsRo) {
 
-//float k_angle = 1; // coefficient to determine the angle, this would be a cos function
 	position = 90 - position;
 
 	if (IsRo) {
@@ -743,6 +711,7 @@ float T_gravity(float position, bool IsDown, float G, bool IsRo) {
 	}
 }
 
+/**************** function to estimate the rotational torque profile *********************/
 void Profile_Record(void) {
 
 	update_encoder(&enc_instance_M1, &htim1); // update the encoder1
@@ -835,148 +804,14 @@ void Profile_Record(void) {
 
 }
 
-void Bimanual_MotorCtrl(void) {
-
-	update_encoder(&enc_instance_M1, &htim1); // update the encoder1
-	update_encoder(&enc_instance_M2, &htim4);
-
-	motor1_vel = enc_instance_M1.velocity * RPM_k; // convert ticks per sec to RPM ----- RPM_k = 60/(PPR*gear_ratio)
-	motor2_vel = -enc_instance_M2.velocity * RPM_k; // convert ticks per sec to RPM ----- RPM_k = 60/(PPR*gear_ratio)
-
-	if (motor1_vel > 0.5) {
-		IsDown = 1;
-	} else if (motor1_vel < -0.5) {
-		IsDown = 0;
-	}
-
-	if (IsDown) {
-
-		motor1_vel = -motor1_vel;
-
-		motor2_vel = -motor2_vel;
-
-	}
-
-	motor1_pos = enc_instance_M1.position * Ticks_to_Deg; // from tick to degrees -> 360.0/(512.0*26.0)
-	motor2_pos = -enc_instance_M2.position * Ticks_to_Deg;
-
-	T_Dis1 = dob1.T_dis;
-	T_Rec1 = rtob1.T_ext;
-
-	T_Dis2 = dob2.T_dis;
-	T_Rec2 = rtob2.T_ext;
-
-	T_P1 = torque_profile(motor1_pos, IsRo, IsDown) / (26.0 * 20.0);
-	T_P2 = torque_profile(motor2_pos, IsRo, IsDown) / (26.0 * 20.0);
-
-	//T_P1 = 1;
-	//T_P2 = 1;
-
-	T_G1 = T_gravity(motor1_pos, IsDown, G, IsRo) / 26;
-	T_G2 = T_gravity(motor2_pos, IsDown, G, IsRo) / 26;
-
-	T_G1 = 0;
-	T_G2 = 0;
-
-	if (IsDown) {
-		k_s = -fabs(k_s);
-		//k_sd = +fabs(k_sd);
-	} else {
-		k_s = fabs(k_s);
-		//k_sd = -fabs(k_sd);
-	}
-
-	apply_pid(&pid_instance_M1, (T_P1 - T_G1 - T_Rec1), dt);
-	apply_pid(&pid_instance_M2,
-			(T_P2 - T_G2 - T_Rec2 + k_s * (motor1_pos - motor2_pos)
-					+ k_sd * (motor1_vel - motor2_vel)), dt);
-
-	Ia_ref1 = ((pid_instance_M1.output) * (0.25 / 5000.0) + T_Dis1) / k_T; // master
-	Ia_ref2 = ((pid_instance_M2.output) * (0.25 / 5000.0) + T_Dis2) / k_T; // slave
-
-	if (fabs(Ia_ref1) > I_max) {
-		Ia_ref1 = (Ia_ref1 / fabs(Ia_ref1)) * I_max;
-	}
-	if (fabs(Ia_ref2) > I_max) {
-		Ia_ref2 = (Ia_ref2 / fabs(Ia_ref2)) * I_max;
-	}
-
-	if (motor1_vel > -1.0) {
-		Ia_ref1 = 0;
-		//Ia_ref2 = 0;
-	}
-
-	update_dob(&dob1, Ia_ref1, motor1_vel * RPM_to_Rads_per_sec * 26.0); //  &dob1,  Ia_ref,  velocity
-	update_rtob(&rtob1, Ia_ref1, motor1_vel * RPM_to_Rads_per_sec * 26.0); // &rtob1, Ia_ref, velocity
-
-	update_dob(&dob2, Ia_ref2, motor2_vel * RPM_to_Rads_per_sec * 26.0); //  &dob1,  Ia_ref,  velocity
-	update_rtob(&rtob2, Ia_ref2, motor2_vel * RPM_to_Rads_per_sec * 26.0); // &rtob1, Ia_ref, velocity
-
-	if (IsDown) {
-		if (Ia_ref1 < 0) {
-			HAL_GPIO_WritePin(MOTOR1_DIR_GPIO_Port, MOTOR1_DIR_Pin,
-					GPIO_PIN_SET);
-		} else {
-			HAL_GPIO_WritePin(MOTOR1_DIR_GPIO_Port, MOTOR1_DIR_Pin,
-					GPIO_PIN_RESET);
-		}
-
-		if (Ia_ref2 < 0) {
-			HAL_GPIO_WritePin(MOTOR2_DIR_GPIO_Port, MOTOR2_DIR_Pin,
-					GPIO_PIN_RESET);
-		} else {
-			HAL_GPIO_WritePin(MOTOR2_DIR_GPIO_Port, MOTOR2_DIR_Pin,
-					GPIO_PIN_SET);
-		}
-	} else {
-		if (Ia_ref1 > 0) {
-			HAL_GPIO_WritePin(MOTOR1_DIR_GPIO_Port, MOTOR1_DIR_Pin,
-					GPIO_PIN_SET);
-		} else {
-			HAL_GPIO_WritePin(MOTOR1_DIR_GPIO_Port, MOTOR1_DIR_Pin,
-					GPIO_PIN_RESET);
-		}
-
-		if (Ia_ref2 > 0) {
-			HAL_GPIO_WritePin(MOTOR2_DIR_GPIO_Port, MOTOR2_DIR_Pin,
-					GPIO_PIN_RESET);
-		} else {
-			HAL_GPIO_WritePin(MOTOR2_DIR_GPIO_Port, MOTOR2_DIR_Pin,
-					GPIO_PIN_SET);
-		}
-	}
-
-	volt1 = fabs(Ia_ref1 * 32767 / I_max);
-	volt2 = fabs(Ia_ref2 * 32767 / I_max);
-
-	HAL_GPIO_WritePin(M_DRIVER1_ENABLE_GPIO_Port, M_DRIVER1_ENABLE_Pin,
-			GPIO_PIN_SET); // M_Driver1_Enable
-	HAL_GPIO_WritePin(M_DRIVER2_ENABLE_GPIO_Port, M_DRIVER2_ENABLE_Pin,
-			GPIO_PIN_SET); // M_Driver1_Enable
-
-	if (fabs(motor1_pos - motor2_pos) < 1.0) {
-		HAL_GPIO_WritePin(M_DRIVER2_ENABLE_GPIO_Port, M_DRIVER2_ENABLE_Pin,
-				GPIO_PIN_RESET); // M_Driver1_Enable
-	} else {
-		HAL_GPIO_WritePin(M_DRIVER2_ENABLE_GPIO_Port, M_DRIVER2_ENABLE_Pin,
-				GPIO_PIN_SET); // M_Driver1_Enable
-	}
-
-	GP8XXX_IIC_setDACOutVoltage(&gp8211s_1, volt1, 0);
-	GP8XXX_IIC_setDACOutVoltage(&gp8211s_2, volt2, 0); // offset 72 points
-
-}
-
+/**************** Function for bi-manual control when motor 1 is master ******************/
 void Bimanual_MotorCtrl_M1(void) {
 
 	update_encoder(&enc_instance_M1, &htim1); // update the encoder1
-	update_encoder(&enc_instance_M2, &htim4);
+	update_encoder(&enc_instance_M2, &htim4); // update the encoder2
 
 	motor1_vel = enc_instance_M1.velocity * RPM_k; // convert ticks per sec to RPM ----- RPM_k = 60/(PPR*gear_ratio)
 	motor2_vel = -enc_instance_M2.velocity * RPM_k; // convert ticks per sec to RPM ----- RPM_k = 60/(PPR*gear_ratio)
-
-	//apply_average_filter(&filter_instance1, motor1_vel_u, &motor1_vel);
-	//apply_average_filter(&filter_instance2, motor2_vel_u, &motor2_vel);
 
 	if (motor1_vel > 0.5) {
 		IsDown = 1;
@@ -994,25 +829,19 @@ void Bimanual_MotorCtrl_M1(void) {
 	motor1_pos = enc_instance_M1.position * Ticks_to_Deg; // from tick to degrees -> 360.0/(512.0*26.0)
 	motor2_pos = -enc_instance_M2.position * Ticks_to_Deg;
 
-	//motor1_pos = 180 - motor1_pos;
-	//motor2_pos = 180 - motor2_pos;
-
-	T_Dis1 = dob1.T_dis;
-	T_Rec1_u = rtob1.T_ext;
+	T_Dis1 = dob1.T_dis;    // disturbance torque
+	T_Rec1_u = rtob1.T_ext; // reaction torque
 
 	T_Dis2 = dob2.T_dis;
 	T_Rec2_u = rtob2.T_ext;
 
-	apply_average_filter(&filter_instance1, T_Rec1_u, &T_Rec1);
+	apply_average_filter(&filter_instance1, T_Rec1_u, &T_Rec1); // filtering reaction torque
 	apply_average_filter(&filter_instance2, T_Rec2_u, &T_Rec2);
 
-	T_P1 = torque_profile(motor1_pos, IsRo, IsDown) / (26.0 * 80.0);
+	T_P1 = torque_profile(motor1_pos, IsRo, IsDown) / (26.0 * 80.0); // get the torque from profile
 	T_P2 = torque_profile(motor2_pos, IsRo, IsDown) / (26.0 * 80.0);
 
-//T_P1 = 1;
-//T_P2 = 1;
-
-	T_G1 = T_gravity(motor1_pos, IsDown, G1, IsRo) / 26;
+	T_G1 = T_gravity(motor1_pos, IsDown, G1, IsRo) / 26; // get the gravity compensation
 	T_G2 = T_gravity(motor2_pos, IsDown, G1, IsRo) / 26;
 
 	T_G1 = 0;
@@ -1026,14 +855,16 @@ void Bimanual_MotorCtrl_M1(void) {
 		//k_sd = -fabs(k_sd);
 	}
 
-	apply_pid(&pid_instance_M1, (T_P1 + T_G1 - T_Rec1), dt);
+	// PID
+	apply_pid(&pid_instance_M1, (T_P1 + T_G1 - T_Rec1), dt); // PID for master
 	apply_pid(&pid_instance_M2,
 			(T_P2 + T_G2 - T_Rec2 + k_s * (motor1_pos - motor2_pos)
-					+ k_sd * (motor1_vel - motor2_vel)), dt);
+					+ k_sd * (motor1_vel - motor2_vel)), dt); // PID for follower
 
-	Ia_ref1 = ((pid_instance_M1.output) * (0.25 / 5000.0) + T_Dis1) / k_T; // master
-	Ia_ref2 = ((pid_instance_M2.output) * (0.25 / 5000.0) + T_Dis2) / k_T; // slave
+	Ia_ref1 = ((pid_instance_M1.output) * (0.25 / 5000.0) + T_Dis1) / k_T; // reference current of master
+	Ia_ref2 = ((pid_instance_M2.output) * (0.25 / 5000.0) + T_Dis2) / k_T; // reference current of follower
 
+	// limit the current
 	if (fabs(Ia_ref1) > I_max) {
 		Ia_ref1 = (Ia_ref1 / fabs(Ia_ref1)) * I_max;
 	}
@@ -1041,26 +872,26 @@ void Bimanual_MotorCtrl_M1(void) {
 		Ia_ref2 = (Ia_ref2 / fabs(Ia_ref2)) * I_max;
 	}
 
+	// deactivate the master when there is no movement on it
 	if (motor1_vel > -0.5) {
 		Ia_ref1 = 0;
 		//Ia_ref2 = 0;
 	}
+
+	// deactivate the follower when there is no position error
 	if (fabs(motor1_pos - motor2_pos) < 0.5) {
 
 		Ia_ref2 = 0;
-		/*HAL_GPIO_WritePin(M_DRIVER2_ENABLE_GPIO_Port, M_DRIVER2_ENABLE_Pin,
-		 GPIO_PIN_RESET); // M_Driver1_Enable*/
-	} /*else {
-	 HAL_GPIO_WritePin(M_DRIVER2_ENABLE_GPIO_Port, M_DRIVER2_ENABLE_Pin,
-	 GPIO_PIN_SET); // M_Driver1_Enable
-	 }*/
+	}
 
+	//DOB and RTOB
 	update_dob(&dob1, fabs(Ia_ref1), motor1_vel * RPM_to_Rads_per_sec * 26.0); //  &dob1,  Ia_ref,  velocity
 	update_rtob(&rtob1, fabs(Ia_ref1), motor1_vel * RPM_to_Rads_per_sec * 26.0); // &rtob1, Ia_ref, velocity
 
 	update_dob(&dob2, fabs(Ia_ref2), motor2_vel * RPM_to_Rads_per_sec * 26.0); //  &dob1,  Ia_ref,  velocity
 	update_rtob(&rtob2, fabs(Ia_ref2), motor2_vel * RPM_to_Rads_per_sec * 26.0); // &rtob1, Ia_ref, velocity
 
+	// set the direction pins accordingly
 	if (IsDown) {
 		if (Ia_ref1 < 0) {
 			HAL_GPIO_WritePin(MOTOR1_DIR_GPIO_Port, MOTOR1_DIR_Pin,
@@ -1095,29 +926,29 @@ void Bimanual_MotorCtrl_M1(void) {
 		}
 	}
 
+	// calculate the relevant voltage for DACs ( it is a value between 0 to 32767)
 	volt1 = fabs(Ia_ref1 * 32767 / I_max);
 	volt2 = fabs(Ia_ref2 * 32767 / I_max);
 
 	HAL_GPIO_WritePin(M_DRIVER1_ENABLE_GPIO_Port, M_DRIVER1_ENABLE_Pin,
 			GPIO_PIN_SET); // M_Driver1_Enable
 	HAL_GPIO_WritePin(M_DRIVER2_ENABLE_GPIO_Port, M_DRIVER2_ENABLE_Pin,
-			GPIO_PIN_SET); // M_Driver1_Enable
+			GPIO_PIN_SET); // M_Driver2_Enable
 
+	// send data to DACs
 	GP8XXX_IIC_setDACOutVoltage(&gp8211s_1, volt1, 0);
-	GP8XXX_IIC_setDACOutVoltage(&gp8211s_2, volt2, 0); // offset 72 points
+	GP8XXX_IIC_setDACOutVoltage(&gp8211s_2, volt2, 0); // has an offset of 72 points , need to check
 
 }
 
+/**************** Function for bi-manual control when motor 2 is master ******************/
 void Bimanual_MotorCtrl_M2(void) {
 
 	update_encoder(&enc_instance_M1, &htim1); // update the encoder1
-	update_encoder(&enc_instance_M2, &htim4);
+	update_encoder(&enc_instance_M2, &htim4); // update the encoder2
 
 	motor1_vel = enc_instance_M1.velocity * RPM_k; // convert ticks per sec to RPM ----- RPM_k = 60/(PPR*gear_ratio)
 	motor2_vel = -enc_instance_M2.velocity * RPM_k; // convert ticks per sec to RPM ----- RPM_k = 60/(PPR*gear_ratio)
-
-	//apply_average_filter(&filter_instance1, motor1_vel_u, &motor1_vel);
-	//apply_average_filter(&filter_instance2, motor2_vel_u, &motor2_vel);
 
 	if (motor2_vel > 0.5) {
 		IsDown = 1;
@@ -1138,22 +969,19 @@ void Bimanual_MotorCtrl_M2(void) {
 	//motor1_pos = 180 - motor1_pos;
 	//motor2_pos = 180 - motor2_pos;
 
-	T_Dis1 = dob1.T_dis;
-	T_Rec1_u = rtob1.T_ext;
+	T_Dis1 = dob1.T_dis;    // disturbance torque
+	T_Rec1_u = rtob1.T_ext; // reaction torque
 
 	T_Dis2 = dob2.T_dis;
 	T_Rec2_u = rtob2.T_ext;
 
-	apply_average_filter(&filter_instance1, T_Rec1_u, &T_Rec1);
+	apply_average_filter(&filter_instance1, T_Rec1_u, &T_Rec1); // filtering reaction torque
 	apply_average_filter(&filter_instance2, T_Rec2_u, &T_Rec2);
 
-	T_P1 = torque_profile(motor1_pos, IsRo, IsDown) / (26.0 * 80.0);
+	T_P1 = torque_profile(motor1_pos, IsRo, IsDown) / (26.0 * 80.0); // get the torque from profile
 	T_P2 = torque_profile(motor2_pos, IsRo, IsDown) / (26.0 * 80.0);
 
-//T_P1 = 1;
-//T_P2 = 1;
-
-	T_G1 = T_gravity(motor1_pos, IsDown, G1, IsRo) / 26;
+	T_G1 = T_gravity(motor1_pos, IsDown, G1, IsRo) / 26; // get the gravity compensation
 	T_G2 = T_gravity(motor2_pos, IsDown, G1, IsRo) / 26;
 
 	T_G1 = 0;
@@ -1167,14 +995,16 @@ void Bimanual_MotorCtrl_M2(void) {
 		//k_sd = -fabs(k_sd);
 	}
 
-	apply_pid(&pid_instance_M2, (T_P2 + T_G2 - T_Rec2), dt);
+	// PID
+	apply_pid(&pid_instance_M2, (T_P2 + T_G2 - T_Rec2), dt); // PID for master
 	apply_pid(&pid_instance_M1,
 			(T_P1 + T_G1 - T_Rec1 + k_s * (motor2_pos - motor1_pos)
-					+ k_sd * (motor2_vel - motor1_vel)), dt);
+					+ k_sd * (motor2_vel - motor1_vel)), dt); // PID for follower
 
-	Ia_ref1 = ((pid_instance_M1.output) * (0.25 / 5000.0) + T_Dis1) / k_T; // master
-	Ia_ref2 = ((pid_instance_M2.output) * (0.25 / 5000.0) + T_Dis2) / k_T; // slave
+	Ia_ref1 = ((pid_instance_M1.output) * (0.25 / 5000.0) + T_Dis1) / k_T; // reference current of master
+	Ia_ref2 = ((pid_instance_M2.output) * (0.25 / 5000.0) + T_Dis2) / k_T; // reference current of follower
 
+	// limit the current
 	if (fabs(Ia_ref1) > I_max) {
 		Ia_ref1 = (Ia_ref1 / fabs(Ia_ref1)) * I_max;
 	}
@@ -1182,22 +1012,26 @@ void Bimanual_MotorCtrl_M2(void) {
 		Ia_ref2 = (Ia_ref2 / fabs(Ia_ref2)) * I_max;
 	}
 
+	// deactivate the master when there is no movement on it
 	if (motor2_vel > -0.5) {
 		Ia_ref2 = 0;
 		//Ia_ref2 = 0;
 	}
 
+	// deactivate the follower when there is no position error
 	if (fabs(motor1_pos - motor2_pos) < 0.5) {
 
 		Ia_ref1 = 0;
 	}
 
+	//DOB and RTOB
 	update_dob(&dob1, fabs(Ia_ref1), motor1_vel * RPM_to_Rads_per_sec * 26.0); //  &dob1,  Ia_ref,  velocity
 	update_rtob(&rtob1, fabs(Ia_ref1), motor1_vel * RPM_to_Rads_per_sec * 26.0); // &rtob1, Ia_ref, velocity
 
 	update_dob(&dob2, fabs(Ia_ref2), motor2_vel * RPM_to_Rads_per_sec * 26.0); //  &dob1,  Ia_ref,  velocity
 	update_rtob(&rtob2, fabs(Ia_ref2), motor2_vel * RPM_to_Rads_per_sec * 26.0); // &rtob1, Ia_ref, velocity
 
+	// set the direction pins accordingly
 	if (IsDown) {
 		if (Ia_ref1 < 0) {
 			HAL_GPIO_WritePin(MOTOR1_DIR_GPIO_Port, MOTOR1_DIR_Pin,
@@ -1232,16 +1066,18 @@ void Bimanual_MotorCtrl_M2(void) {
 		}
 	}
 
+	// calculate the relevant voltage for DACs ( it is a value between 0 to 32767)
 	volt1 = fabs(Ia_ref1 * 32767 / I_max);
 	volt2 = fabs(Ia_ref2 * 32767 / I_max);
 
 	HAL_GPIO_WritePin(M_DRIVER1_ENABLE_GPIO_Port, M_DRIVER1_ENABLE_Pin,
 			GPIO_PIN_SET); // M_Driver1_Enable
 	HAL_GPIO_WritePin(M_DRIVER2_ENABLE_GPIO_Port, M_DRIVER2_ENABLE_Pin,
-			GPIO_PIN_SET); // M_Driver1_Enable
+			GPIO_PIN_SET); // M_Driver2_Enable
 
+	// send data to DACs
 	GP8XXX_IIC_setDACOutVoltage(&gp8211s_1, volt1, 0);
-	GP8XXX_IIC_setDACOutVoltage(&gp8211s_2, volt2, 0); // offset 72 points
+	GP8XXX_IIC_setDACOutVoltage(&gp8211s_2, volt2, 0); // has an offset of 72 points , need to check
 
 }
 
@@ -1283,9 +1119,7 @@ int main(void) {
 	MX_USART2_UART_Init();
 	/* USER CODE BEGIN 2 */
 
-	srand(HAL_GetTick());
-
-	fresult = f_mount(&fs, "", 0);
+	fresult = f_mount(&fs, "", 0); // mount SD
 	if (fresult != FR_OK)
 		send_uart("error in mounting SD Card...\n");
 	else
@@ -1293,14 +1127,12 @@ int main(void) {
 
 	send_uart(".........................\n");
 
+
 	xTaskCreate(BM_Task, "BM", 512, NULL, 5, &BM_Task_Hnadler);
 	xTaskCreate(INITIALIZATION_Task, "INIT", 512, NULL, 2,
 			&INITIALIZATION_Task_Hnadler);
 	xTaskCreate(SDCARD_Task, "SD", 1024, NULL, 1, &SDCARD_Task_Hnadler);
 
-//xTaskCreate(pxTaskCode, pcName, usStackDepth, pvParameters, uxPriority, pxCreatedTask)
-
-// Initialize ADC, encoder, PWM, and set initial parameters
 	HAL_TIM_Encoder_Start_IT(&htim1, TIM_CHANNEL_ALL);
 	HAL_TIM_Encoder_Start_IT(&htim4, TIM_CHANNEL_ALL);
 
@@ -1310,15 +1142,15 @@ int main(void) {
 	set_pid_gain(&pid_instance_M1, Kp_M, Ki_M, Kd_M); // set gains
 	set_pid_gain(&pid_instance_M2, Kp_S, Ki_S, Kd_S); // set gains
 
-	J1 = findJ(IsMale);
+	J1 = findJ(IsMale); // calculate inertia of arm
 	J = 0.001;
-	G1 = findG(IsMale);
+	G1 = findG(IsMale); // calculate center of gravity of arm
 
-	set_dob(&dob1, k_T, J, g_dis); // k = 70.5mNm/A  ,  j = 3069.1 gcm2  , g_dis = 50
-	set_rtob(&rtob1, k_T, J, g_dis, 0.0129, 0.0003);
+	set_dob(&dob1, k_T, J, g_dis); // k = 70.5mNm/A  ,  j = 3069.1 gcm2
+	set_rtob(&rtob1, k_T, J, g_dis, 0.0129, 0.0003); // dynamic friction coefficient = 0.0129 Nm, static fric. =  0.0003 Nm/rpm
 
 	set_dob(&dob2, k_T, J, g_dis); // k = 70.5mNm/A  ,  j = 3069.1 gcm2  , g_dis = 50
-	set_rtob(&rtob2, k_T, J, g_dis, 0.0129, 0.0003);
+	set_rtob(&rtob2, k_T, J, g_dis, 0.0129, 0.0003); // dynamic friction coefficient = 0.0129 Nm, static fric. =  0.0003 Nm/rpm
 
 	RPM_k = (float) 60.0 / (PPR * gear_ratio); // to calculate RPM form ticks/s
 	RPM_to_Rads_per_sec = 2.0 * 3.14 / 60.0; // to calculate rads per sec from rpm
@@ -1363,6 +1195,8 @@ int main(void) {
 	 Flash_Read_Data(0x08040000, Rx_Data, 10);
 
 	 int numofwords = (strlen(data11) / 4) + ((strlen(data11) % 4) != 0);
+
+	 // dont use the address of 0x08080000,0x0800C100, it is already taken,need to try another locations
 
 	 Flash_Write_Data(0x08080000, (uint32_t*) data11, numofwords);
 	 Flash_Read_Data(0x08080000, Rx_Data, numofwords);
